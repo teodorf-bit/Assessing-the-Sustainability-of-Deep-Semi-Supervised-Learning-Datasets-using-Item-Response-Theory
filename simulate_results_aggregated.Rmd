@@ -1,0 +1,465 @@
+---
+title: "USB results"
+output: html_document
+:date: "2023-08-23"
+---
+Clear the R enviorment
+```{r}
+rm(list = ls())
+```
+
+
+## Packages
+Import all the relevant packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(kableExtra)
+library(stringr)
+library(rstan)
+library(patchwork)
+library(gtools)
+library(posterior)
+library(cmdstanr)
+library(latex2exp)
+library(bayesplot)
+seed <- 20200331
+set.seed(seed)
+```
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = '/home/teodor/Desktop/projects/papers/journal3/code/')
+```
+
+```{r cars}
+source("utils.R")
+```
+
+## Import dataset, remove defixmath because it is only used for task == "usb_cv", therefore it cannot be used for the aggregated results.data
+```{r}
+dataset <- readr::read_csv("results/combined_csv.csv") %>% dplyr::filter(seed<=9) %>%
+  dplyr::mutate(accuracy = 1-error_rate/100) %>%
+  dplyr::select(-c(task, label, error_rate)) %>%
+  dplyr::filter(accuracy<1) %>%
+  dplyr::filter(algorithm!="fullysupervised") %>%
+  dplyr::filter(algorithm!="defixmatch")  %>%
+  dplyr::filter(algorithm!="supervised")
+
+
+```
+Obtaining a numerical index for the dataset and the model
+
+```{r}
+#convert to factor
+dataset$algorithm <- as.factor(dataset$algorithm)
+dataset$dataset <- as.factor(dataset$dataset)
+#convert to integer
+dataset$algorithmIndex <- as.numeric(dataset$algorithm)
+dataset$datasetIndex <- as.numeric(dataset$dataset)
+#vector with the names in order
+algorithms <- levels(dataset$algorithm)
+datasets <- levels(dataset$dataset)
+```
+
+# IRT Bayesian congeneric model in Stan
+
+We are using below a Bayesian version of the congeneric model described in the Handbook of Item Response Theory Vol.1 chapter 10.
+
+This model is coded in Stan, compiled to C++. The code of the model is shown below.
+
+Loading and compiling the model
+```{r cache=T}
+stanmodel <- cmdstan_model('~/.cmdstan/cmdstan-2.32.2/congeneric.stan') 
+```
+## Standata
+Here we create the list of data that will be passed to Stan
+
+```{r}
+standata <- list(
+  N = nrow(dataset),
+  y = dataset$accuracy,
+  p = dataset$algorithmIndex,
+  Np = length(algorithms),
+  item = dataset$datasetIndex,
+  Nitem = length(datasets)
+)
+```
+
+## Running the model
+```{r eval=F}
+irt.fit <- stanmodel$sample(
+  data= standata,
+  seed = seed,
+  chains = 4,
+  parallel_chains = 4,
+  max_treedepth = 15
+)
+irt.fit$save_object(file='/home/teodor/Desktop/projects/papers/journal3/code/fit-aggregated.RDS')
+```
+
+## Checks
+
+Posterior draws
+```{r cache=T}
+irt.fit <- readRDS('/home/teodor/Desktop/projects/papers/journal3/code/fit-aggregated.RDS')
+np <- bayesplot::nuts_params(irt.fit)
+draws_a <- irt.fit$draws('a')
+draws_b <- irt.fit$draws('b')
+draws_theta <- irt.fit$draws('theta')
+draws_sigma <- irt.fit$draws('sigma')
+```
+
+### Traceplots
+
+Traceplots for a
+```{r cache=T}
+p_trace_a <- bayesplot::mcmc_trace(draws_a)
+png("traceplots-a-aggregated.png")
+p_trace_a
+```
+
+Traceplots for b
+```{r cache=T}
+p_trace_b <- bayesplot::mcmc_trace(draws_b)
+png("traceplots-b-aggregated.png")
+p_trace_b
+```
+
+Traceplots for theta
+```{r cache=T}
+p_trace_theta <- bayesplot::mcmc_trace(draws_theta)
+png("traceplots-theta-aggregated.png")
+p_trace_theta
+```
+
+Traceplot for sigma
+```{r cache=T}
+p_trace_sigma <- bayesplot::mcmc_trace(draws_sigma)
+png("traceplots-sigma-aggregated.png")
+p_trace_sigma
+```
+
+## Posterior predictive
+
+```{r cache=T}
+y <- standata$y
+#yrep <- posterior::as_draws_matrix(irt.fit$draws('y_rep'))
+y_rep <- posterior::as_draws(irt.fit$draws(variables = "y_rep", format = "draws_df"))
+y_rep <- y_rep[,1:length(y)]
+```
+
+
+```{r cache=T}
+p_bars_grouped <- bayesplot::ppc_stat_grouped(y=y, yrep=as.matrix(y_rep), group=dataset$dataset, binwidth = 0.005)
+#pdf('posterior-predictive-check-bars_grouped-aggregated.pdf')
+png("posterior-parameters-grouped-aggregated.png")
+p_bars_grouped
+```
+
+The model seems to be good at predicting the fitted data by dataset. The observed values are in the bounds of the predictive posterior values. 
+
+Since there are no diverging iterations, the rhat and neff are good, the traceplots do not indicate any diverging chain and the model fits well the observed data we can proceed with the analysis.
+
+# Results
+
+Let's first get a summary table of the estimated values of the model with 90% credible interval
+
+```{r}
+fit_summary_datasets <- irt.fit$summary(c('a','b')) %>%
+  dplyr::rename(Rhat=rhat) %>%
+  dplyr::select(-mean,-median,-sd,-mad,-q5,-q95) %>%
+  kable(
+    "latex",
+    table.envir = 'table',
+    caption='Diagnostics for the posterior estimates of $a$ and $b$.',
+    booktabs=T,
+    label="diagnostics-a-b-aggregated",
+    format.args=list(scientific=FALSE),
+    digits = 3,
+    linesep=""
+  ) %>%
+  kable_styling(latex_options = c("hold_position"),
+                full_width = F) %>%
+  readr::write_lines('diagnostic-a-b-aggregated.tex')
+
+fit_summary_models <- irt.fit$summary(c('theta')) %>%
+  dplyr::rename(Rhat=rhat) %>%
+  dplyr::select(-mean,-median,-sd,-mad,-q5,-q95) %>%
+  kable(
+    "latex",
+    table.envir = 'table',
+    caption='Diagnostics for the posterior estimates of $\theta$.',
+    booktabs=T,
+    label="diagnostics-theta-aggregated",
+    format.args=list(scientific=FALSE),
+    digits = 3,
+    linesep=""
+  ) %>%
+  kable_styling(latex_options = c("hold_position"),
+                full_width = F) %>%
+  readr::write_lines('diagnostic-theta-aggregated.tex')
+
+fit_summary_sigma <- irt.fit$summary(c('sigma')) %>%
+  dplyr::rename(Rhat=rhat) %>%
+  dplyr::select(-mean,-median,-sd,-mad,-q5,-q95) %>%
+  kable(
+    "latex",
+    table.envir = 'table',
+    caption='Diagnostics for the posterior estimates of $\sigma$.',
+    booktabs=T,
+    label="diagnostics-sigma-aggregated",
+    format.args=list(scientific=FALSE),
+    digits = 3,
+    linesep=""
+  ) %>%
+  kable_styling(latex_options = c("hold_position"),
+                full_width = F) %>%
+  readr::write_lines('diagnostic-sigma-aggregated.tex')
+```
+
+Creating a table for the datasets
+```{r}
+table_datasets <- irt.fit$summary(c('a','b')) %>% 
+  dplyr::select(Dataset=variable, 
+                Median=median,
+                'CI 5%'=q5,
+                'CI 95%'=q95)
+ 
+table_datasets$Dataset <- rep(datasets,2)
+ 
+kable(table_datasets,
+      "latex",
+      caption='Summary statistics of the discrimination and easiness parameters.', 
+      booktabs=T,
+      digits =3,
+      label="posterior-discrimination-easiness",
+      format.args=list(scientific=FALSE),
+      linesep="") %>% 
+  kable_styling() %>% 
+  pack_rows("Discrimination value (a)",1,15) %>% 
+  pack_rows("Easiness level (b)",16,30) %>%
+  kable_styling(latex_options = c("hold_position"),
+                full_width = F) %>%
+  readr::write_lines('posterior-discrimination-easiness.tex')
+```
+
+Creating a table for the models ability
+```{r message=F}
+table_models <- irt.fit$summary(c('theta')) %>%
+  select(Algorithms=variable, 
+         Median=median,
+         'CI 5%'=q5,
+         'CI 95%'=q95)
+
+table_models$Algorithms <- algorithms
+ 
+kable(table_models,
+      "latex",
+      caption='Summary values of the ability level of the SSL algorithms', 
+      booktabs=T,
+      digits=3,
+      label="posterior-ability",
+      format.args=list(scientific=FALSE),
+      linesep="")  %>%
+  
+  kable_styling(latex_options = c("hold_position"),
+                full_width = F) %>%
+  readr::write_lines('posterior-ability.tex')
+```
+
+We can also get a representative figure of these tables 
+
+```{r message=F}
+p_mcmc_intervals_a <- mcmc_intervals(draws_a) +
+  scale_y_discrete(labels=datasets)+
+  labs(x='Discrimination parameter (a)',
+       y='Dataset',
+       title='Discrimination parameter distribution')
+png("discrimination-aggregated.png")
+pdf("discrimination-aggregated.pdf")
+p_mcmc_intervals_a
+```
+
+```{r message=F}
+p_mcmc_intervals_b <- mcmc_intervals(draws_b) +
+  scale_y_discrete(labels=datasets)+
+  labs(x='Easiness level parameter (b)',
+       y='Dataset',
+       title='Easiness level parameter distribution')
+png("easiness-aggregated.png")
+pdf("easiness-aggregated.pdf")
+p_mcmc_intervals_b
+```
+
+```{r message=F}
+p_mcmc_intervals_theta <- mcmc_intervals(draws_theta) +
+  scale_y_discrete(labels=algorithms)+
+  labs(x='ability level parameter ($\\theta$)',
+       y='Dataset',
+       title='Ability level parameter distribution')
+png("ability-aggregated.png")
+pdf("ability-aggregated.pdf")
+p_mcmc_intervals_theta
+```
+
+We can observe the actual average values of accuracy for each one of these datasets
+
+```{r}
+dataset %>% group_by(dataset) %>% 
+  summarise('Mean error rate'=mean(accuracy)) %>% 
+  kable(caption = 'Average accuracy for each dataset',
+        booktabs=T,
+        digits=3,
+        format='html') %>% 
+  kable_styling()
+```
+
+
+```{r message=F}
+p_mcmc_intervals_theta <- mcmc_intervals(draws_theta) +
+  scale_y_discrete(labels=algorithms)+
+  labs(x=unname(TeX("Ability level ($\\theta$) ")),
+       y='SSL algorithm',
+       title='Ability level parameter distribution')
+p_mcmc_intervals_theta
+```
+
+From this analysis we can see that most of the datasets used in SSL evaluations have low discrimination factopdfr and high easiness levels. Datasets with very high easiness levels and low discrimination might be usesful to observe if the algorithm is correctly implemented but not to be used to compare different algorithms.
+
+From the ability levels of the SSL algorithms, we can observe that some groups of algorithms perform better than others but there is little difference between them.
+
+### Item information 
+
+First let's create a few helper functions to calculate the item information
+
+```{r}
+p_info <- function(a,b, theta){
+     return(exp(a*(theta-b))/(1+exp(a*(theta-b))))
+  }
+q_info <- function(a,b, theta){
+    return(1-p_info(a,b, theta))
+  }
+#a and b are a vector of 3 a[1] is lower q05 a[2] is median and a[3] is q95
+#return a data frame ready to be plottted
+
+
+item_info_with_intervals <- function(a,b,item, thetamin=-5, thetamax=5,step=0.1){
+  theta <- seq(from=thetamin, to=thetamax, by=step)
+  info_median <- a[1]^2*p_info(a[1],b[1],theta)*q_info(a[1],b[1],theta)
+  info_lower <- a[2]^2*p_info(a[2],b[2],theta)*q_info(a[2],b[2],theta)
+  info_higher <- a[3]^2*p_info(a[3],b[3],theta)*q_info(a[3],b[3],theta)
+  
+  out<- data.frame(Information= c(info_lower,info_median,info_higher),
+                   theta=c(theta,theta,theta),
+                   pars=c(rep('q05',length(theta)),
+                           rep('median',length(theta)),
+                           rep('q95',length(theta))),
+                   item=c(rep(item,length(theta)),
+                          rep(item,length(theta)),
+                          rep(item,length(theta))))
+  return(out)
+}
+```
+
+Creating a single data frame
+```{r}
+
+
+fit_summary_a <- irt.fit$summary(c('a')) 
+fit_summary_b <- irt.fit$summary(c('b'))
+fit_summary_theta <- irt.fit$summary(c('theta'))
+
+item_information_df <- NULL
+for(i in seq(1:length(datasets))){
+  a<-as.matrix(fit_summary_a[i,c(3,6,7)])
+  b<-as.matrix(fit_summary_b[i,c(3,6,7)])
+  iinfo <- item_info_with_intervals(a=a,b=b,item = i,thetamin = -15, thetamax = 15)
+  item_information_df <- rbind(item_information_df,iinfo)
+}
+
+item_information_dfx <- item_information_df
+for(i in seq(1:length(datasets))){
+  item_information_dfx$item[item_information_dfx$item==i] <- datasets[i]
+}
+```
+
+Now we can create an information plot for every item
+
+```{r}
+item_information_curve <- item_information_dfx %>% 
+  pivot_wider(names_from = 'pars', values_from = 'Information') %>% 
+  ggplot(aes(x=theta))+
+    geom_line(aes(y=median), color='black')+
+    facet_wrap(~item,
+               ncol=4) +
+    labs(title='Item information curve',
+         x=unname(TeX("Ability ($\\theta$)")),
+         y='Information',
+         color='Information interval')+
+    theme_bw() +
+    theme(legend.position = 'bottom')
+png("item-information-curve.png")
+pdf("item-information-curve.pdf")
+item_information_curve
+
+```
+### Test information
+
+We can also look at the test information. First, we need to pivot wider so we can sum the items
+
+```{r}
+test_information_df <- item_information_df %>% 
+  pivot_wider(names_from = 'item', values_from = 'Information') %>% 
+  mutate(TestInfo = dplyr::select(., -theta, -pars) %>% rowSums()) %>% 
+  dplyr::select(theta, pars, TestInfo)
+
+```
+
+Now that we have calculated the test parameters we can plot the test information
+
+First let's get a horizontal line to show where the algorithms median ability lies
+```{r}
+alg_median <- fit_summary_theta %>% 
+  mutate(Algorithm=algorithms) %>% 
+  select(Algorithm, median) 
+```
+
+
+```{r}
+test_information_curve <- test_information_df %>% 
+  dplyr::select(theta, pars, TestInfo) %>% 
+  pivot_wider(names_from = 'pars', values_from = 'TestInfo') %>% 
+  ggplot(aes(x=theta)) +
+  geom_line(aes(y=median))+
+  geom_vline(data=alg_median, aes(xintercept=median,color=Algorithm),linetype='dashed')+
+  labs(
+    title='Test Information Curve',
+    x=unname(TeX("Ability ($\\theta$)")),
+    y='Test information',
+    color='Algorithm median'
+  )+
+  theme_bw()+
+  #guides(color=guide_legend(nrow=5,byrow=TRUE))+
+  #theme(legend.position = 'bottom')
+png("test-information-curve.png")
+pdf("test-information-curve.pdf")
+test_information_curve
+```
+
+# Session information
+
+This document was compiled under the following session
+
+```{r}
+sessionInfo()
+```
+
+The following cmdstan version was used for compiling and sampling the model
+
+```{r}
+cmdstanr::cmdstan_version()
+```
+
